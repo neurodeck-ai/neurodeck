@@ -1,0 +1,22 @@
+# Core TTS and audio dependencies
+coqui-tts==0.24.3
+sounddevice==0.5.1
+numpy==1.26.4
+
+# PyTorch (CPU version)
+torch==2.2.0
+torchaudio==2.2.0
+
+# Transformers with LogitsWarper support
+transformers==4.40.2
+
+# Additional dependencies (installed automatically with above packages)
+# tokenizers==0.19.1
+# scipy>=1.13.0
+# librosa>=0.11.0
+# matplotlib>=3.8.4
+# pyyaml>=6.0
+# tqdm>=4.27
+# filelock
+# huggingface-hub
+# safetensors>=0.4.3
