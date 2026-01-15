@@ -376,9 +376,15 @@ class TTSService:
                 # Show status after successful playback
                 remaining_count = self.message_queue.qsize()
                 if remaining_count > 0:
-                    status_msg = f"🎵 Played {tts_message.agent_name}, {remaining_count} TTS messages pending"
+                    # Peek at who's next without removing from queue
+                    try:
+                        next_msg = self.message_queue._queue[0] if self.message_queue._queue else None
+                        next_agent = next_msg.agent_name if next_msg else "unknown"
+                        status_msg = f"🎵 Played {tts_message.agent_name} | Queue: {remaining_count} remaining | Next: {next_agent}"
+                    except (IndexError, AttributeError):
+                        status_msg = f"🎵 Played {tts_message.agent_name} | Queue: {remaining_count} remaining"
                 else:
-                    status_msg = f"🎵 Played {tts_message.agent_name}, TTS queue empty"
+                    status_msg = f"🎵 Played {tts_message.agent_name} | Queue empty"
                 self._log("TTS", status_msg, "system-info")
                 
                 # Mark task as done
