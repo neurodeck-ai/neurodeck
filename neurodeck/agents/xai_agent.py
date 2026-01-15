@@ -334,82 +334,97 @@ class XAIAgent(BaseAgent):
             self.logger.debug(f"Model: {self.agent_config.model}, Max tokens: {self.agent_config.max_tokens}")
             await self.send_system_log(LogLevel.INFO, f"Generating response using {self.agent_config.model}")
             
-            # Initial API call (using OpenAI client with xAI endpoint)
-            response = await self.xai_client.chat.completions.create(
-                model=self.agent_config.model,
-                messages=messages,
-                max_tokens=self.agent_config.max_tokens,
-                temperature=self.agent_config.temperature,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None
-            )
-            
-            message = response.choices[0].message
-            
-            # Handle tool calls
-            if message.tool_calls:
-                # Add assistant message with tool calls
-                messages.append({
-                    "role": "assistant",
-                    "content": message.content,
-                    "tool_calls": [
-                        {
-                            "id": tool_call.id,
-                            "type": tool_call.type,
-                            "function": {
-                                "name": tool_call.function.name,
-                                "arguments": tool_call.function.arguments
-                            }
-                        } for tool_call in message.tool_calls
-                    ]
-                })
-                
-                # Execute each tool call
-                for tool_call in message.tool_calls:
-                    try:
-                        # Parse arguments
-                        args = json.loads(tool_call.function.arguments)
-                        
-                        # Execute tool
-                        result = await self.handle_tool_request(
-                            tool_call.function.name,
-                            args
-                        )
-                        
-                        # Add tool result
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.function.name,
-                            "content": str(result)
-                        })
-                    except Exception as e:
-                        messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": tool_call.function.name,
-                            "content": f"Error: {str(e)}"
-                        })
-                
-                # Get final response
-                final_response = await self.xai_client.chat.completions.create(
+            # Tool execution loop - continues until we get a text response or hit max iterations
+            max_tool_iterations = 10
+            iteration = 0
+
+            while iteration < max_tool_iterations:
+                iteration += 1
+
+                # API call (with tools available for chained calls)
+                response = await self.xai_client.chat.completions.create(
                     model=self.agent_config.model,
                     messages=messages,
                     max_tokens=self.agent_config.max_tokens,
-                    temperature=self.agent_config.temperature
+                    temperature=self.agent_config.temperature,
+                    tools=tools if tools else None,
+                    tool_choice="auto" if tools else None
                 )
-                
-                final_content = final_response.choices[0].message.content
-                if final_content:
-                    self.logger.info(f"Generated response with tools ({len(final_content)} chars)")
-                    return final_content.strip()
-            
-            # Regular response without tool use
+
+                message = response.choices[0].message
+
+                # Check if this is a tool call response
+                if message.tool_calls:
+                    self.logger.info(f"Tool use iteration {iteration}/{max_tool_iterations}")
+                    await self.send_system_log(LogLevel.DEBUG, f"Processing tool calls (iteration {iteration})")
+
+                    # Add assistant message with tool calls
+                    messages.append({
+                        "role": "assistant",
+                        "content": message.content,
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": tool_call.type,
+                                "function": {
+                                    "name": tool_call.function.name,
+                                    "arguments": tool_call.function.arguments
+                                }
+                            } for tool_call in message.tool_calls
+                        ]
+                    })
+
+                    # Execute each tool call
+                    for tool_call in message.tool_calls:
+                        try:
+                            # Parse arguments
+                            args = json.loads(tool_call.function.arguments)
+
+                            # Execute tool
+                            result = await self.handle_tool_request(
+                                tool_call.function.name,
+                                args
+                            )
+
+                            # Add tool result
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "content": self.truncate_tool_result(result)
+                            })
+                        except Exception as e:
+                            self.logger.error(f"Tool execution failed: {e}")
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "content": f"Error: {str(e)}"
+                            })
+
+                    # Continue loop to get next response
+                    continue
+
+                # Not a tool call response - extract text content
+                if message.content and message.content.strip():
+                    if iteration > 1:
+                        self.logger.info(f"Generated response with tools after {iteration} iterations ({len(message.content)} chars)")
+                    else:
+                        self.logger.info(f"Generated response ({len(message.content)} chars)")
+                    return message.content.strip()
+
+                # Response had no text content
+                self.logger.warning(f"Empty response from xAI API (finish_reason: {response.choices[0].finish_reason})")
+                return None
+
+            # Hit max iterations
+            self.logger.warning(f"Hit max tool iterations ({max_tool_iterations}), forcing text extraction")
+            await self.send_system_log(LogLevel.WARNING, f"Tool chain exceeded {max_tool_iterations} iterations")
+
+            # Try to extract any text from the last response
             if message.content and message.content.strip():
-                self.logger.info(f"Generated response ({len(message.content)} chars)")
                 return message.content.strip()
-            
-            self.logger.warning("Empty response from xAI API")
+
             return None
             
         except openai.RateLimitError as e:

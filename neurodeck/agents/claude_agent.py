@@ -292,84 +292,99 @@ class ClaudeAgent(BaseAgent):
             self.logger.debug(f"Sending request to Claude with {len(messages)} messages")
             await self.send_system_log(LogLevel.INFO, f"Generating response using {self.agent_config.model}")
             
-            # Initial API call
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.anthropic_client.messages.create(
-                    model=self.agent_config.model,
-                    max_tokens=self.agent_config.max_tokens,
-                    temperature=self.agent_config.temperature,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=tools if tools else None
-                )
-            )
-            
-            # Handle tool use
-            if response.stop_reason == "tool_use":
-                tool_results = []
-                
-                for content_block in response.content:
-                    if content_block.type == "tool_use":
-                        # Execute tool
-                        try:
-                            result = await self.handle_tool_request(
-                                content_block.name,
-                                content_block.input
-                            )
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content_block.id,
-                                "content": str(result)
-                            })
-                        except Exception as e:
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": content_block.id,
-                                "content": f"Error: {str(e)}",
-                                "is_error": True
-                            })
-                
-                # Continue conversation with tool results
-                messages.append({
-                    "role": "assistant",
-                    "content": response.content
-                })
-                messages.append({
-                    "role": "user",
-                    "content": tool_results
-                })
-                
-                # Get final response
-                final_response = await asyncio.get_event_loop().run_in_executor(
+            # Tool execution loop - continues until we get a text response or hit max iterations
+            max_tool_iterations = 10
+            iteration = 0
+
+            while iteration < max_tool_iterations:
+                iteration += 1
+
+                # API call (with tools available for chained calls)
+                response = await asyncio.get_event_loop().run_in_executor(
                     None,
                     lambda: self.anthropic_client.messages.create(
                         model=self.agent_config.model,
                         max_tokens=self.agent_config.max_tokens,
                         temperature=self.agent_config.temperature,
                         system=system_prompt,
-                        messages=messages
+                        messages=messages,
+                        tools=tools if tools else None
                     )
                 )
-                
-                # Extract text content
-                for content_block in final_response.content:
-                    if content_block.type == "text":
-                        self.logger.info(f"Generated response with tools ({len(content_block.text)} chars)")
-                        return content_block.text
-            
-            # Regular response without tool use
-            if response.content and len(response.content) > 0:
+
+                # Check if this is a tool use response
+                if response.stop_reason == "tool_use":
+                    self.logger.info(f"Tool use iteration {iteration}/{max_tool_iterations}")
+                    await self.send_system_log(LogLevel.DEBUG, f"Processing tool calls (iteration {iteration})")
+
+                    tool_results = []
+
+                    for content_block in response.content:
+                        if content_block.type == "tool_use":
+                            # Execute tool
+                            try:
+                                result = await self.handle_tool_request(
+                                    content_block.name,
+                                    content_block.input
+                                )
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": content_block.id,
+                                    "content": self.truncate_tool_result(result)
+                                })
+                            except Exception as e:
+                                self.logger.error(f"Tool execution failed: {e}")
+                                tool_results.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": content_block.id,
+                                    "content": f"Error: {str(e)}",
+                                    "is_error": True
+                                })
+
+                    # Append assistant message and tool results for next iteration
+                    messages.append({
+                        "role": "assistant",
+                        "content": response.content
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": tool_results
+                    })
+
+                    # Continue loop to get next response
+                    continue
+
+                # Not a tool use response - extract text content
+                if response.content and len(response.content) > 0:
+                    content_text = ""
+                    for content_block in response.content:
+                        if content_block.type == "text":
+                            content_text += content_block.text
+
+                    if content_text.strip():
+                        if iteration > 1:
+                            self.logger.info(f"Generated response with tools after {iteration} iterations ({len(content_text)} chars)")
+                        else:
+                            self.logger.info(f"Generated response ({len(content_text)} chars)")
+                        return content_text.strip()
+
+                # Response had no text content
+                self.logger.warning(f"Empty response from Claude API (stop_reason: {response.stop_reason})")
+                return None
+
+            # Hit max iterations
+            self.logger.warning(f"Hit max tool iterations ({max_tool_iterations}), forcing text extraction")
+            await self.send_system_log(LogLevel.WARNING, f"Tool chain exceeded {max_tool_iterations} iterations")
+
+            # Try to extract any text from the last response
+            if response.content:
                 content_text = ""
                 for content_block in response.content:
                     if content_block.type == "text":
                         content_text += content_block.text
-                
                 if content_text.strip():
-                    self.logger.info(f"Generated response ({len(content_text)} chars)")
                     return content_text.strip()
-            
-            self.logger.warning("Empty response from Claude API")
+
             return None
             
         except anthropic.RateLimitError as e:

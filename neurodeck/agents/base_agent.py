@@ -446,8 +446,8 @@ class BaseAgent(ABC):
         
         agent_name_lower = self.name.lower()
         
-        # Always check for @mention pattern or @everyone anywhere in the message
-        if f"@{agent_name_lower}" in content or "@everyone" in content:
+        # Always check for @mention pattern or @everyone/@all anywhere in the message
+        if f"@{agent_name_lower}" in content or "@everyone" in content or "@all" in content:
             return True
         
         # For user messages, respond if not directed at a specific other agent
@@ -692,6 +692,43 @@ class BaseAgent(ABC):
         """Handle tool approval result from orchestrator."""
         # TODO: Implement tool approval handling
         pass
+
+    def truncate_tool_result(self, result: Any, max_chars: int = 50000) -> str:
+        """
+        Truncate tool result if it exceeds max_chars, with clear indication of truncation.
+
+        Args:
+            result: The tool result (any type, will be converted to string)
+            max_chars: Maximum characters to keep (default 50k to leave room for context)
+
+        Returns:
+            String result, possibly truncated with truncation notice
+        """
+        result_str = str(result)
+        original_len = len(result_str)
+
+        if original_len <= max_chars:
+            return result_str
+
+        # Calculate truncation stats
+        truncated_len = max_chars - 500  # Leave room for the truncation notice
+        removed_chars = original_len - truncated_len
+        removed_pct = (removed_chars / original_len) * 100
+
+        # Truncate and add notice
+        truncated_result = result_str[:truncated_len]
+
+        truncation_notice = (
+            f"\n\n[TRUNCATED - Output too large for context window]\n"
+            f"  Original size: {original_len:,} characters\n"
+            f"  Shown: {truncated_len:,} characters\n"
+            f"  Removed: {removed_chars:,} characters ({removed_pct:.1f}%)\n"
+            f"  Tip: Use more targeted queries or process data in smaller chunks."
+        )
+
+        self.logger.warning(f"Tool result truncated: {original_len:,} -> {truncated_len:,} chars ({removed_pct:.1f}% removed)")
+
+        return truncated_result + truncation_notice
 
     async def handle_tool_request(self, tool_name: str, tool_args: dict) -> Any:
         """Handle tool execution request from AI provider."""
