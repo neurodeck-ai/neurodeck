@@ -132,8 +132,16 @@ class GroqAgent(BaseAgent):
             paths_str = ", ".join(allowed_paths)
             size_mb = max_file_size // (1024 * 1024)
             
-            description = f"Access files within permitted directories: {paths_str}. Maximum file size: {size_mb}MB. Auto-approved operations: {', '.join(auto_approve)}. Operations requiring approval: {', '.join(require_approval)}."
-            
+            description = (
+                f"Access files within permitted directories: {paths_str}. "
+                f"Maximum file size: {size_mb}MB. "
+                f"Auto-approved operations: {', '.join(auto_approve)}. "
+                f"Operations requiring approval: {', '.join(require_approval)}. "
+                "IMPORTANT: Always READ a file before using WRITE to modify it. "
+                "Use APPEND to add content without overwriting. "
+                "WRITE replaces entire file contents."
+            )
+
             tools.append({
                 "type": "function",
                 "function": {
@@ -144,8 +152,8 @@ class GroqAgent(BaseAgent):
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["read", "write", "list", "delete"],
-                                "description": "The filesystem operation to perform"
+                                "enum": ["read", "write", "append", "list", "delete"],
+                                "description": "The filesystem operation: read (view file), write (replace entire file - read first!), append (add to end of file), list (directory contents), delete (remove file)"
                             },
                             "path": {
                                 "type": "string",
@@ -153,7 +161,7 @@ class GroqAgent(BaseAgent):
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Content to write (required for write action)"
+                                "description": "Content for write (replaces file) or append (adds to end) actions"
                             }
                         },
                         "required": ["action", "path"]

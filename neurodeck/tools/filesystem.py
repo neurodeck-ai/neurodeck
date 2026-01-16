@@ -144,31 +144,34 @@ class FilesystemTool:
         
         raise PermissionError(f"Access denied: {path} is outside allowed directories")
     
-    async def execute(self, action: str, path: str, content: Optional[str] = None, 
+    async def execute(self, action: str, path: str, content: Optional[str] = None,
                      agent_name: Optional[str] = None, use_locking: bool = True,
                      base_delay: float = 1.0, max_delay: float = 30.0, **kwargs) -> Any:
         """
         Execute filesystem operation.
-        
+
         Args:
-            action: Operation to perform (read, write, list, delete, lock_status)
+            action: Operation to perform (read, write, append, list, delete, lock_status)
             path: File or directory path
-            content: Content for write operations
+            content: Content for write/append operations
             agent_name: Name of agent performing operation (for lock tracking)
-            
+
         Returns:
             Operation result
         """
         # Validate path
         target_path = self._validate_path(path)
-        
+
         logger.info(f"Executing filesystem {action} on {target_path} (agent: {agent_name or 'unknown'})")
-        
+
         if action == "read":
             return await self._read_file(target_path)
         elif action == "write":
-            return await self._write_file_with_locking(target_path, content, agent_name, 
+            return await self._write_file_with_locking(target_path, content, agent_name,
                                                      base_delay, max_delay, use_locking)
+        elif action == "append":
+            return await self._append_file_with_locking(target_path, content, agent_name,
+                                                       base_delay, max_delay, use_locking)
         elif action == "list":
             return await self._list_directory(target_path)
         elif action == "delete":
@@ -404,18 +407,81 @@ class FilesystemTool:
         """Write file without locking (fallback for when locking is disabled)."""
         if agent_name is None:
             agent_name = "unknown"
-            
+
         # Check content size
         content_size = len(content.encode('utf-8'))
         if content_size > self.max_file_size:
             raise ValueError(f"Content too large: {content_size} bytes (max: {self.max_file_size})")
-        
+
         # Create parent directories if needed
         path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Write file asynchronously (no locking)
         async with aiofiles.open(path, 'w', encoding='utf-8') as f:
             await f.write(content)
-        
+
         logger.info(f"Agent '{agent_name}' wrote {content_size} bytes to {path} (no locking)")
         return f"Successfully wrote {content_size} bytes to {path}"
+
+    async def _append_file_with_locking(self, path: Path, content: Optional[str],
+                                        agent_name: Optional[str],
+                                        base_delay: float = 1.0, max_delay: float = 30.0,
+                                        use_locking: bool = True) -> str:
+        """Append to file with OS-level locking and smart retry delays."""
+        if content is None:
+            raise ValueError("Content is required for append operation")
+
+        if agent_name is None:
+            agent_name = "unknown"
+
+        # Check content size
+        content_size = len(content.encode('utf-8'))
+
+        # For append, check combined size if file exists
+        existing_size = path.stat().st_size if path.exists() else 0
+        if existing_size + content_size > self.max_file_size:
+            raise ValueError(f"Append would exceed max file size: {existing_size} + {content_size} > {self.max_file_size}")
+
+        # Create parent directories if needed
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # If locking is disabled, use simple append
+        if not use_locking:
+            async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+                await f.write(content)
+            logger.info(f"Agent '{agent_name}' appended {content_size} bytes to {path} (no locking)")
+            return f"Successfully appended {content_size} bytes to {path}"
+
+        try:
+            async with aiofiles.open(path, 'a', encoding='utf-8') as f:
+                fd = f.fileno()
+
+                # Try to acquire exclusive lock (non-blocking, single attempt)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                # Success! Register lock holder and reset retry count
+                self._lock_registry.register_lock(str(path), agent_name)
+                self._lock_registry.reset_retry_count(agent_name, str(path))
+
+                try:
+                    await f.write(content)
+                    logger.info(f"Agent '{agent_name}' appended {content_size} bytes to {path}")
+                    return f"Successfully appended {content_size} bytes to {path}"
+                finally:
+                    self._lock_registry.release_lock(str(path))
+
+        except BlockingIOError:
+            # File is locked - calculate delay before responding
+            delay = self._lock_registry.should_delay_response(
+                agent_name, str(path), base_delay, max_delay
+            )
+
+            # Sleep before responding to slow down retry attempts
+            await asyncio.sleep(delay)
+
+            # Get lock holder info for error message
+            lock_holder = self._lock_registry.get_lock_holder(str(path))
+            retry_count = self._lock_registry.get_retry_count(agent_name, str(path))
+
+            error_msg = self._format_lock_error(path, agent_name, lock_holder, retry_count, delay)
+            raise ValueError(error_msg)
